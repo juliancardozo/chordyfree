@@ -19,10 +19,16 @@ from .theory import QUALITIES, SHARP, Chord
 # popular (lo mismo que muestra Chordify) sin diluir la deteccion.
 VOCAB_QUALITIES = ("maj", "min", "7", "min7", "maj7", "min7b5", "dim", "sus4", "sus2")
 
-# Peso de cada grado dentro de la plantilla. La fundamental y la tercera son las
-# que definen el acorde; la quinta es ambigua (la comparten mayor y menor) y la
-# septima es mas debil en la mezcla, asi que pesan menos.
-DEGREE_WEIGHT = {0: 1.0, 3: 1.0, 4: 1.0, 7: 0.55, 10: 0.7, 11: 0.7, 6: 0.8, 8: 0.8,
+# Peso de cada grado dentro de la plantilla. Fundamental, tercera y quinta pesan
+# lo mismo; las extensiones pesan menos porque son mas debiles en la mezcla.
+#
+# Medido contra cuatro transcripciones humanas (2026-10-16): con la quinta en
+# 0.55 una triada perdia contra la triada una tercera arriba, que re-lee su
+# quinta como tercera propia (E -> G#m, Eb -> Gm, A -> C#m). Subirla a 1.0, junto
+# con change_penalty 1.6 -> 2.0, llevo la precision de transiciones de 0.44 a 0.74
+# de media y el tiempo con acordes del vocabulario de la transcripcion de 0.78 a
+# 0.96. El test sintetico sigue en 99.8 %.
+DEGREE_WEIGHT = {0: 1.0, 3: 1.0, 4: 1.0, 7: 1.0, 10: 0.7, 11: 0.7, 6: 0.8, 8: 0.8,
                  2: 0.7, 5: 0.7, 9: 0.7}
 
 # Prior por calidad, en unidades de log-verosimilitud. Sin esto, los acordes de
@@ -82,13 +88,8 @@ def build_templates() -> tuple[np.ndarray, list[Chord | None]]:
     return np.vstack(templates), labels
 
 
-def beat_synchronous_chroma(
-    y: np.ndarray, sr: int, beat_times: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Croma promediado entre beat y beat. Devuelve (croma por beat, croma de bajos).
-
-    Trabajar por beat (y no por frame) es lo que alinea los acordes al compas,
-    que es exactamente la grilla que muestra Chordify.
+def frame_chroma(y: np.ndarray, sr: int, hop: int = 512) -> tuple[np.ndarray, np.ndarray]:
+    """Croma por frame (12, n) de rango completo y del registro grave.
 
     Nota: NO se comprime el croma logaritmicamente. Probado y medido: log1p sobre
     la magnitud del CQT levanta el piso de ruido respecto de los picos y deja el
@@ -101,38 +102,50 @@ def beat_synchronous_chroma(
     # Quitar la percusion antes de calcular croma: los golpes de batería son
     # banda ancha y contaminan todas las clases de altura por igual.
     y_harm = librosa.effects.harmonic(y, margin=3.0)
-
-    # Croma de rango completo para la armonia.
-    chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=512)
-
+    chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=hop)
     # Croma restringido al registro grave: pista del bajo, util para desempatar
     # acordes que comparten notas.
-    bass_chroma = librosa.feature.chroma_cqt(
-        y=y_harm, sr=sr, hop_length=512,
+    bass = librosa.feature.chroma_cqt(
+        y=y_harm, sr=sr, hop_length=hop,
         fmin=librosa.note_to_hz("C2"), n_octaves=2)
+    return chroma, bass
 
-    frames = librosa.time_to_frames(beat_times, sr=sr, hop_length=512)
-    frames = np.clip(frames, 0, chroma.shape[1] - 1)
 
-    def aggregate(mat: np.ndarray) -> np.ndarray:
-        out = np.zeros((len(frames) - 1, 12), dtype=np.float32)
-        for i in range(len(frames) - 1):
-            a, b = frames[i], max(frames[i] + 1, frames[i + 1])
-            seg = mat[:, a:b]
-            # Mediana, no media: resiste el ataque del acorde y los adornos.
-            out[i] = np.median(seg, axis=1) if seg.size else 0.0
-            n = np.linalg.norm(out[i])
-            if n:
-                out[i] /= n
-        return out
+def aggregate_by_beat(mat: np.ndarray, beat_times: np.ndarray, sr: int,
+                      hop: int = 512) -> np.ndarray:
+    """Promedia (mediana) un croma por frame entre beat y beat. Devuelve (n-1, 12)."""
+    import librosa
 
-    return aggregate(chroma), aggregate(bass_chroma)
+    frames = librosa.time_to_frames(beat_times, sr=sr, hop_length=hop)
+    frames = np.clip(frames, 0, mat.shape[1] - 1)
+    out = np.zeros((max(0, len(frames) - 1), 12), dtype=np.float32)
+    for i in range(len(frames) - 1):
+        a, b = frames[i], max(frames[i] + 1, frames[i + 1])
+        seg = mat[:, a:b]
+        # Mediana, no media: resiste el ataque del acorde y los adornos.
+        out[i] = np.median(seg, axis=1) if seg.size else 0.0
+        n = np.linalg.norm(out[i])
+        if n:
+            out[i] /= n
+    return out
+
+
+def beat_synchronous_chroma(
+    y: np.ndarray, sr: int, beat_times: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Croma promediado entre beat y beat. Devuelve (croma por beat, croma de bajos).
+
+    Trabajar por beat (y no por frame) es lo que alinea los acordes al compas,
+    que es exactamente la grilla que muestra Chordify.
+    """
+    chroma, bass = frame_chroma(y, sr)
+    return aggregate_by_beat(chroma, beat_times, sr), aggregate_by_beat(bass, beat_times, sr)
 
 
 def viterbi_decode(
     scores: np.ndarray,
     priors: np.ndarray | None = None,
-    change_penalty: float = 1.6,
+    change_penalty: float = 2.0,
     no_chord_penalty: float = 1.4,
     sharpness: float = 6.0,
 ) -> np.ndarray:

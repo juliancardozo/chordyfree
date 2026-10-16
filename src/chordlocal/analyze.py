@@ -16,7 +16,7 @@ from .fetch import Source
 from .recognize import ChordSpan, decode, recognize, state_labels
 from .theory import key_uses_flats
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 
 
 @dataclass
@@ -33,6 +33,7 @@ class Analysis:
     contraste: dict = field(default_factory=dict)
     simple: list[dict] = field(default_factory=list)
     chroma: list = field(default_factory=list)
+    bass: list = field(default_factory=list)      # croma grave por beat
     version: int = ANALYSIS_VERSION
 
     def to_json(self) -> str:
@@ -42,7 +43,9 @@ class Analysis:
     def load(path: Path) -> "Analysis":
         d = json.loads(Path(path).read_text())
         d.pop("version", None)
-        return Analysis(**d, version=ANALYSIS_VERSION)
+        campos = set(Analysis.__dataclass_fields__)
+        return Analysis(**{k: v for k, v in d.items() if k in campos},
+                        version=ANALYSIS_VERSION)
 
     @property
     def flats(self) -> bool:
@@ -50,11 +53,50 @@ class Analysis:
 
 
 def track_beats(wav: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Beats y downbeats con beat_this (CPU). Devuelve (beats, downbeats) en segundos."""
-    from beat_this.inference import File2Beats
-    f2b = File2Beats(device="cpu", dbn=False)
-    beats, downbeats = f2b(str(wav))
-    return np.asarray(beats, dtype=float), np.asarray(downbeats, dtype=float)
+    """Beats y downbeats (en segundos) de un archivo, con tempo y compas coherentes."""
+    import librosa
+    from . import beats as bt
+
+    y, sr = librosa.load(str(wav), sr=22050, mono=True)
+    r = bt.track(y, sr)
+    return r["beats"], r["downbeats"]
+
+
+def detect_track_end(y: np.ndarray, sr: int, hop: int = 512) -> float | None:
+    """Detecta si al final del audio empieza OTRA cancion, y devuelve donde cortar.
+
+    Firma medida en una descarga real: fade-out (la mediana de los 4 s previos
+    cae >15 dB bajo el nivel del tema), un silencio de >=0,35 s por debajo de
+    -45 dB, y despues audio a volumen pleno hasta el final. Los cortes a mitad
+    de tema (breaks, silencios dramaticos) no tienen fade previo, y por eso no
+    se confunden.
+    """
+    import librosa
+
+    rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+    if len(rms) < 100:
+        return None
+    t = hop / sr
+    db = 20 * np.log10(np.maximum(rms, 1e-9))
+    rel = db - np.percentile(db, 95)
+    dur = len(rel) * t
+    sil = rel < -45
+    i = int(dur * 0.75 / t)
+    while i < len(sil):
+        if not sil[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(sil) and sil[j]:
+            j += 1
+        largo, resto = (j - i) * t, dur - j * t
+        if largo >= 0.35 and 3.0 <= resto <= 60.0:
+            antes = np.median(rel[max(0, i - int(4 / t)):i])
+            despues = np.median(rel[j:])
+            if antes < -15 and despues > -20:
+                return round(i * t, 2)
+        i = j
+    return None
 
 
 def estimate_bpm(beats: np.ndarray) -> float:
@@ -92,25 +134,38 @@ def analyze(
     import librosa
 
     from . import harmony, verify
-    from .theory import SHARP
+    from .theory import FLAT, SHARP
 
     timings: dict[str, float] = {}
+
+    from . import beats as bt
+    from .recognize import aggregate_by_beat, frame_chroma
 
     t0 = time.perf_counter()
     progress("  [1/6] cargando audio...")
     y, sr = librosa.load(str(source.wav), sr=22050, mono=True)
+    fin = detect_track_end(y, sr)
+    if fin:
+        progress(f"        al final arranca otra pista: se analiza hasta {fin:.1f} s")
+        y = y[:int(fin * sr)]
     timings["load"] = round(time.perf_counter() - t0, 1)
 
     t0 = time.perf_counter()
     progress("  [2/6] detectando beats y compases...")
-    beats, downbeats = track_beats(source.wav)
+    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
+    rb = bt.track(y, sr, onset=onset, onset_fps=sr / 512)
+    beats, downbeats = rb["beats"], rb["downbeats"]
     timings["beats"] = round(time.perf_counter() - t0, 1)
     if len(beats) < 2:
         raise RuntimeError("no se detectaron beats; el audio puede estar en silencio")
+    progress(f"        {rb['metro']} a {rb['bpm']} BPM ({rb['metodo']})")
 
     t0 = time.perf_counter()
     progress(f"  [3/6] reconociendo acordes sobre {len(beats)} beats...")
-    spans, chroma, bass = recognize(y, sr, beats, downbeats)
+    fch, fbass = frame_chroma(y, sr)
+    chroma = aggregate_by_beat(fch, beats, sr)
+    bass = aggregate_by_beat(fbass, beats, sr)
+    spans = decode(chroma, bass, beats, downbeats)
     timings["chords"] = round(time.perf_counter() - t0, 1)
 
     # --- Segunda pasada: teoria musical ---
@@ -130,9 +185,9 @@ def analyze(
         key = harmony.estimate_key(spans, chroma)
     timings["armonia"] = round(time.perf_counter() - t0, 1)
 
-    tonic, mode = SHARP[key.tonic], key.mode
-    conf = key.confidence
     flats = key.flats
+    tonic, mode = (FLAT if flats else SHARP)[key.tonic], key.mode
+    conf = key.confidence
 
     # --- Contraste con fuentes abiertas de internet ---
     t0 = time.perf_counter()
@@ -141,7 +196,7 @@ def analyze(
         progress("  [5/6] contrastando con MusicBrainz / AcousticBrainz...")
         try:
             ev = verify.gather(source.title, source.artist)
-            bpm_det = estimate_bpm(beats)
+            bpm_det = rb["bpm"]
             contraste = {
                 "evidencia": ev.to_dict(),
                 "tempo": verify.reconcile_tempo(bpm_det, ev.bpm),
@@ -160,6 +215,8 @@ def analyze(
         progress("  [6/6] transcribiendo notas para tablatura...")
         from .transcribe import to_tab, transcribe_notes
         notes = transcribe_notes(source.wav)
+        if fin:
+            notes = [n for n in notes if n.start < fin]
         tabs = to_tab(notes)
         notes_out = [{"start": round(n.start, 3), "end": round(n.end, 3),
                       "midi": n.midi, "confidence": round(n.confidence, 3)} for n in notes]
@@ -199,7 +256,7 @@ def analyze(
     armonia = {
         "tonalidad": key.name(),
         "alternativas": key.alternatives,
-        "escala": [SHARP[p] for p in key.scale()],
+        "escala": [(FLAT if flats else SHARP)[p] for p in key.scale()],
         "pedal": pedal,
         "ambiguos": ambiguos[:40],
         "n_ambiguos": len(ambiguos),
@@ -213,10 +270,11 @@ def analyze(
         contraste=contraste,
         simple=simple_spans,
         chroma=[[round(float(v), 3) for v in row] for row in chroma],
-        source={**source.to_dict(), "sample_rate": sr},
+        bass=[[round(float(v), 3) for v in row] for row in bass],
+        source={**source.to_dict(), "sample_rate": sr, "fin_musica": fin or round(len(y) / sr, 2)},
         key={"tonic": tonic, "mode": mode, "confidence": round(conf, 2), "flats": flats},
-        tempo={"bpm": estimate_bpm(beats), "meter": infer_meter(beats, downbeats),
-               "beat_count": len(beats)},
+        tempo={"bpm": rb["bpm"], "meter": rb["metro"], "beat_count": len(beats),
+               "pulsos_por_compas": rb["pulsos"], "metodo": rb["metodo"]},
         beats=beats_out,
         chords=[{"start": round(s.start, 3), "end": round(s.end, 3),
                  "label": s.chord.name(flats) if s.chord else "N",

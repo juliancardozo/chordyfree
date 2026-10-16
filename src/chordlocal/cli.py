@@ -1,7 +1,10 @@
 """CLI de ChordLocal.
 
-  chordlocal analizar <url-o-archivo> [--transponer N] [--capo N] [--no-notes]
+  chordlocal analizar <url-o-archivo> [--transponer N] [--capo N] [--no-notes] [--sin-buscar]
   chordlocal mostrar  <analysis.json> [--transponer N] [--capo N]
+  chordlocal buscar   <analysis.json> [--tema "..."] [--artista "..."]
+  chordlocal tocar    <analysis.json> [--letra archivo.txt]
+  chordlocal app      [--port 7700]
 """
 from __future__ import annotations
 
@@ -18,9 +21,7 @@ OUT = ROOT / "out"
 
 def _emit(a, outdir: Path, transpose: int, capo: int, want_notes: bool) -> None:
     """Escribe todas las salidas y muestra el resumen por consola."""
-    from . import render
-
-    outdir.mkdir(parents=True, exist_ok=True)
+    from . import render, salidas
 
     print()
     print(render.summary(a, transpose, capo))
@@ -30,49 +31,7 @@ def _emit(a, outdir: Path, transpose: int, capo: int, want_notes: bool) -> None:
     grid = render.chord_grid(a, transpose, capo)
     print("\n".join("  " + l for l in grid.splitlines()[:24]))
 
-    shapes = render.chord_shapes(a, transpose, capo)
-    if shapes:
-        print("  DIGITACIONES" + (f"  (con cejilla en {capo})" if capo else ""))
-        print("  " + "-" * 50)
-        print("\n".join("  " + l for l in shapes.splitlines()))
-
-    written: list[Path] = []
-
-    p = outdir / "analysis.json"
-    p.write_text(a.to_json())
-    written.append(p)
-
-    p = outdir / "acordes.txt"
-    p.write_text(render.summary(a, transpose, capo) + "\n\n"
-                 + render.chord_grid(a, transpose, capo) + "\n"
-                 + render.chord_shapes(a, transpose, capo))
-    written.append(p)
-
-    p = outdir / "cancion.chordpro"
-    p.write_text(render.chordpro(a, transpose, capo))
-    written.append(p)
-
-    if want_notes and a.tab:
-        p = outdir / "tablatura.txt"
-        p.write_text(render.ascii_tab(a))
-        written.append(p)
-
-    try:
-        written.append(render.musicxml(a, outdir / "partitura.musicxml",
-                                       transpose, include_notes=want_notes))
-    except Exception as e:
-        print(f"  ! no se pudo generar MusicXML: {e}")
-
-    try:
-        written.append(render.midi(a, outdir / "cancion.mid", transpose))
-    except Exception as e:
-        print(f"  ! no se pudo generar MIDI: {e}")
-
-    try:
-        from . import sheet
-        written.append(sheet.build(a, outdir / "hoja.html"))
-    except Exception as e:
-        print(f"  ! no se pudo generar la hoja HTML: {e}")
+    written = salidas.escribir(a, outdir, transpose, capo, want_notes)
 
     arm = a.armonia or {}
     if arm:
@@ -85,19 +44,6 @@ def _emit(a, outdir: Path, transpose: int, capo: int, want_notes: bool) -> None:
         if arm.get("pedal"):
             pd = arm["pedal"]
             print(f"  Pedal     : {pd['nota']} en el bajo el {pd['fraccion']:.0%} del tema")
-        if arm.get("n_ambiguos"):
-            print(f"  Sin 3a    : {arm['n_ambiguos']} acordes con la tercera indefinida")
-        print()
-
-    con = a.contraste or {}
-    if con.get("evidencia"):
-        ev = con["evidencia"]
-        print("  CONTRASTE CON INTERNET")
-        print("  " + "-" * 50)
-        print(f"  Fuentes   : {', '.join(ev.get('fuentes') or ['ninguna'])}")
-        t, k = con.get("tempo", {}), con.get("tonalidad", {})
-        print(f"  Tempo     : {t.get('detectado')} propio vs {t.get('externo')} externo -> {t.get('veredicto')}")
-        print(f"  Tonalidad : {k.get('detectada')} propia vs {k.get('externa')} externa -> {k.get('veredicto')}")
         print()
 
     print("  ARCHIVOS GENERADOS")
@@ -109,9 +55,33 @@ def _emit(a, outdir: Path, transpose: int, capo: int, want_notes: bool) -> None:
             rel = p
         print(f"  {rel}  ({p.stat().st_size / 1024:.1f} KB)")
     print()
-    print("  Abri hoja.html en el navegador: transposicion y cejilla en vivo.")
-    print("  Abri partitura.musicxml en MuseScore para pentagrama + tablatura.")
+    print(f"  Abri {outdir / 'cancion.html'}: letra, acordes, audio y analisis.")
     print()
+
+
+def _buscar_online(a, outdir: Path, tema: str = "", artista: str = "") -> dict:
+    from . import fuentes
+    outdir.mkdir(parents=True, exist_ok=True)
+    print("\n  BUSQUEDA ONLINE (letra y acordes)")
+    print("  " + "-" * 50)
+    f = fuentes.buscar(a, outdir, CACHE, consulta=tema, artista=artista,
+                       progress=lambda m: print(m, flush=True))
+    lc, le, cc = f["lacuerda"], f["letra"], f["cifraclub"]
+    el = lc.get("elegido")
+    if el:
+        con = el.get("concordancia", {})
+        print(f"  Acordes  : LaCuerda, {el['artista']} - {el['tema']}"
+              f" (concordancia con el audio {con.get('puntaje', 0)}%"
+              f", desplazamiento {con.get('offset', 0):+d})")
+    else:
+        print(f"  Acordes  : LaCuerda {lc.get('estado')}")
+    print(f"  Letra    : {le.get('estado')}"
+          + (f" ({le.get('artista')} - {le.get('tema')}, "
+             f"{'sincronizada' if le.get('sincronizada') else 'sin sincronizar'})"
+             if le.get("estado") == "ok" else ""))
+    print(f"  CifraClub: {cc.get('estado', '-')}"
+          + (f" -> abrila a mano: {cc.get('probable')}" if cc.get("estado") == "bloqueado" else ""))
+    return f
 
 
 def cmd_analizar(args) -> int:
@@ -136,8 +106,13 @@ def cmd_analizar(args) -> int:
         print(f"error analizando: {e}", file=sys.stderr)
         return 1
 
-    slug = src.video_id or "track"
-    _emit(a, OUT / slug, args.transponer, args.capo, not args.no_notes)
+    outdir = OUT / (src.video_id or "track")
+    if not args.sin_buscar and not args.sin_internet:
+        try:
+            _buscar_online(a, outdir)
+        except Exception as e:
+            print(f"  ! la busqueda online fallo: {e}")
+    _emit(a, outdir, args.transponer, args.capo, not args.no_notes)
     return 0
 
 
@@ -145,6 +120,43 @@ def cmd_mostrar(args) -> int:
     from .analyze import Analysis
     a = Analysis.load(Path(args.analysis))
     _emit(a, Path(args.analysis).parent, args.transponer, args.capo, bool(a.tab))
+    return 0
+
+
+def cmd_buscar(args) -> int:
+    """Busca letra y acordes online y regenera cancion.html."""
+    from .analyze import Analysis
+    from . import pagina
+
+    ruta = Path(args.analysis)
+    a = Analysis.load(ruta)
+    try:
+        _buscar_online(a, ruta.parent, args.tema, args.artista)
+    except Exception as e:
+        print(f"error en la busqueda: {e}", file=sys.stderr)
+        return 1
+    p = pagina.build(a, ruta.parent)
+    print(f"\n  {p}\n")
+    return 0
+
+
+def cmd_tocar(args) -> int:
+    """Regenera cancion.html; con --letra importa antes una transcripcion local."""
+    from .analyze import Analysis
+    from . import fuentes, pagina
+
+    ruta = Path(args.analysis)
+    a = Analysis.load(ruta)
+    if args.letra:
+        texto = Path(args.letra).read_text(encoding="utf-8", errors="replace")
+        fuentes.importar(ruta.parent, texto, origen="archivo local")
+    d = pagina.armar(a, ruta.parent)
+    p = pagina.build(a, ruta.parent)
+    print(f"\n  {p}  ({p.stat().st_size / 1024:.1f} KB)")
+    print(f"  modo: {d['modo']}   tonalidad: {d['tonalidad']}"
+          + (f"   concordancia hoja/audio: {d['comparacion']['puntaje']}%"
+             if d.get("comparacion") else ""))
+    print()
     return 0
 
 
@@ -157,7 +169,7 @@ def cmd_app(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="chordlocal",
-        description="Analiza canciones y genera acordes, tablaturas y partituras.")
+        description="Analiza canciones y genera acordes, letra, tablaturas y partituras.")
     p.add_argument("--version", action="version", version=f"chordlocal {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -170,7 +182,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--no-notes", action="store_true",
                    help="omitir transcripcion de notas (mas rapido, sin tablatura)")
     a.add_argument("--sin-internet", action="store_true",
-                   help="no contrastar con MusicBrainz / AcousticBrainz")
+                   help="no consultar nada online (ni MusicBrainz ni letras/acordes)")
+    a.add_argument("--sin-buscar", action="store_true",
+                   help="no buscar letra ni acordes online")
     a.set_defaults(func=cmd_analizar)
 
     m = sub.add_parser("mostrar", help="re-renderiza un analysis.json ya calculado")
@@ -178,6 +192,18 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--transponer", type=int, default=0, metavar="N")
     m.add_argument("--capo", type=int, default=0, metavar="N")
     m.set_defaults(func=cmd_mostrar)
+
+    b = sub.add_parser("buscar", help="busca letra y acordes online (LaCuerda, LRCLIB, Cifra Club)")
+    b.add_argument("analysis", help="ruta a analysis.json")
+    b.add_argument("--tema", default="", help="nombre del tema, si el del video no sirve")
+    b.add_argument("--artista", default="", help="artista, si el del video no sirve")
+    b.set_defaults(func=cmd_buscar)
+
+    t = sub.add_parser("tocar", help="regenera cancion.html (letra + acordes + analisis)")
+    t.add_argument("analysis", help="ruta a analysis.json")
+    t.add_argument("--letra", default="", metavar="ARCHIVO",
+                   help="importar este txt de acordes-sobre-letra antes de generar")
+    t.set_defaults(func=cmd_tocar)
 
     g = sub.add_parser("app", help="abre la interfaz grafica en el navegador")
     g.add_argument("--port", type=int, default=7700)

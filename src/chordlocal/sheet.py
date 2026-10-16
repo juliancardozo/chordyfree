@@ -4,8 +4,8 @@ Todo lo interactivo (transponer, cejilla, cambiar de version) ocurre en el
 navegador sobre los datos ya analizados. No re-analiza nada: la transposicion es
 aritmetica modulo 12, igual que en el backend.
 
-La pagina nunca incluye letra: esta herramienta analiza armonia, no reproduce
-la obra.
+Esta es la hoja analitica (armonia por compas, sin letra). La letra con
+acordes, el reproductor y las fuentes online estan en cancion.html (pagina.py).
 """
 from __future__ import annotations
 
@@ -239,7 +239,7 @@ footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);
 <footer>
   Generado por ChordLocal a partir del audio. El análisis armónico es automático
   y contrastado con datos abiertos; verificá de oído antes de darlo por definitivo.
-  Esta hoja no incluye letra.
+  La letra con acordes está en cancion.html.
 </footer>
 </div>
 <script>
@@ -257,7 +257,8 @@ function render(){
   $("art").textContent=D.artista||"";
 
   // Tonalidad mostrada, ya transpuesta.
-  const base=D.escala.length?SHARP.indexOf(D.escala[0]):0;
+  const e0=D.escala.length?D.escala[0]:"C";
+  const base=Math.max(0,SHARP.indexOf(e0)>=0?SHARP.indexOf(e0):FLAT.indexOf(e0));
   const keyNow=(flats?FLAT:SHARP)[((base+transpose)%12+12)%12];
   const modoTxt=(D.tonalidad||"").includes("menor")?"menor":"mayor";
 
@@ -338,7 +339,7 @@ function contraste(){
     r[3]+'</td></tr>').join("")+'</table></div>';
   h+='<p class="muted" style="margin-top:10px">Fuentes: '+
     ((c.fuentes||[]).join(", ")||"ninguna disponible")+
-    '. No se consultan sitios de acordes: sus transcripciones son obra de terceros.</p>';
+    '. La letra y los acordes encontrados online están en la hoja principal (cancion.html).</p>';
   if((c.notas||[]).length) h+='<ul class="muted">'+c.notas.map(n=>'<li>'+n+'</li>').join("")+'</ul>';
   h+='</div>';
   $("contraste").innerHTML=h;

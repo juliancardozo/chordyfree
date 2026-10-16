@@ -1,7 +1,7 @@
 [project]
 name = "chordlocal"
-version = "0.1.0"
-description = "Analisis local de canciones: acordes, beats, tablaturas y partituras"
+version = "0.2.0"
+description = "Analisis local de canciones: acordes, letra, beats, tablaturas y partituras"
 requires-python = ">=3.11,<3.12"
 
 # Versiones fijadas al techo de Mac Intel x86_64: torch 2.2.2 es el ultimo
@@ -26,6 +26,7 @@ dependencies = [
     # ffmpeg como binario estatico: en macOS Monterey Homebrew ya no tiene bottles.
     "imageio-ffmpeg>=0.6.0",
     "soundfile>=0.13",
+    "flask>=3.0",
 ]
 
 [project.scripts]

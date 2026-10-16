@@ -40,6 +40,8 @@ class Source:
     origin: str = ""        # URL o ruta original
     duration: float = 0.0
     video_id: str = ""
+    track: str = ""         # nombre del tema segun la metadata musical de YouTube
+    album: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -70,6 +72,23 @@ def _probe_duration(wav: Path) -> float:
     return float(info.frames) / float(info.samplerate)
 
 
+_YT_ID = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([\w-]{11})")
+
+
+def normalize_url(url: str) -> str:
+    """Reduce un enlace de YouTube a `watch?v=<id>`.
+
+    El boton de compartir de YouTube copia URLs de radio
+    (`&list=RD...&start_radio=1`). Con esas, el audio descargado puede arrastrar
+    los primeros segundos de la pista siguiente y el analizador los transcribe
+    como parte de la cancion. Tambien se descarta `&t=`, que no aplica al audio.
+    """
+    if not re.search(r"youtube\.com|youtu\.be", url, re.I):
+        return url
+    m = _YT_ID.search(url)
+    return f"https://www.youtube.com/watch?v={m.group(1)}" if m else url
+
+
 def from_youtube(url: str, cache: Path) -> Source:
     """Descarga el audio de una URL con yt-dlp y lo convierte a WAV.
 
@@ -78,6 +97,7 @@ def from_youtube(url: str, cache: Path) -> Source:
     """
     import yt_dlp
 
+    url = normalize_url(url)
     cache.mkdir(parents=True, exist_ok=True)
 
     # Primera pasada: solo metadata, para conocer el ID y poder cachear.
@@ -95,14 +115,22 @@ def from_youtube(url: str, cache: Path) -> Source:
 
     vid = info.get("id") or hashlib.sha256(url.encode()).hexdigest()[:11]
     title = info.get("title") or "desconocido"
-    artist = info.get("artist") or info.get("uploader") or ""
+    # `artist`/`track` vienen cuando YouTube reconoce la musica (Content ID);
+    # son mucho mas confiables que el nombre del canal para buscar letras.
+    artist = (info.get("artist") or info.get("creator") or "").split(",")[0].strip()
+    track = info.get("track") or ""
+    album = info.get("album") or ""
+    if not artist:
+        artist = re.sub(r"\s*(- Topic|VEVO|Oficial|Official)\s*$", "",
+                        info.get("uploader") or "", flags=re.I).strip()
     wav = cache / f"{vid}.wav"
     meta_path = cache / f"{vid}.source.json"
 
     if wav.exists() and meta_path.exists():
         meta = json.loads(meta_path.read_text())
-        return Source(wav=wav, title=meta["title"], artist=meta.get("artist", ""),
-                      origin=url, duration=meta.get("duration", 0.0), video_id=vid)
+        return Source(wav=wav, title=meta["title"], artist=meta.get("artist") or artist,
+                      origin=url, duration=meta.get("duration", 0.0), video_id=vid,
+                      track=meta.get("track") or track, album=meta.get("album") or album)
 
     tmpl = str(cache / f"{vid}.%(ext)s")
     # Sin postprocesadores a proposito: el FFmpegExtractAudio de yt-dlp exige
@@ -135,9 +163,10 @@ def from_youtube(url: str, cache: Path) -> Source:
 
     duration = _probe_duration(wav)
     meta_path.write_text(json.dumps(
-        {"title": title, "artist": artist, "duration": duration, "origin": url}, ensure_ascii=False))
+        {"title": title, "artist": artist, "track": track, "album": album,
+         "duration": duration, "origin": url}, ensure_ascii=False))
     return Source(wav=wav, title=title, artist=artist, origin=url,
-                  duration=duration, video_id=vid)
+                  duration=duration, video_id=vid, track=track, album=album)
 
 
 def from_file(path: str | Path, cache: Path) -> Source:

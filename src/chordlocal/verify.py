@@ -1,10 +1,9 @@
 """Contraste del analisis contra fuentes abiertas de internet.
 
 Se usan MusicBrainz (metadata canonica) y AcousticBrainz (tonalidad y BPM
-analizados por la comunidad). Deliberadamente NO se consultan sitios de acordes:
-esas transcripciones son obra de terceros y copiarlas seria exactamente lo que
-este proyecto evita. El contraste sirve para corregir tempo y tonalidad, que es
-donde los datos abiertos existen y donde el detector mas se equivoca.
+analizados por la comunidad). Las transcripciones de acordes y las letras se buscan aparte, en
+`fuentes.py`; aca solo se contrastan tempo y tonalidad, que es donde los datos
+abiertos existen y donde el detector mas se equivoca.
 
 Todo es best-effort: si no hay red o la cancion no esta en la base, el analisis
 sigue igual y simplemente no hay contraste.

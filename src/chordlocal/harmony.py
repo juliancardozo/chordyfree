@@ -36,6 +36,9 @@ KS_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52,
 KS_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54,
                      4.75, 3.98, 2.69, 3.34, 3.17])
 
+CROMATICOS = {0: "I", 1: "bII", 2: "II", 3: "bIII", 4: "III", 5: "IV", 6: "#IV",
+              7: "V", 8: "bVI", 9: "VI", 10: "bVII", 11: "VII"}
+
 # Tonalidades comodas en guitarra, por cantidad de acordes en posicion abierta.
 EASY_KEYS = {7: "G", 0: "C", 2: "D", 9: "A", 4: "E"}
 
@@ -49,9 +52,10 @@ class Key:
 
     @property
     def flats(self) -> bool:
-        name = SHARP[self.tonic]
-        rel = name if self.mode == "major" else SHARP[(self.tonic + 3) % 12]
-        return rel in {"F", "Bb", "Eb", "Ab", "Db", "Gb"}
+        # La armadura la define la relativa mayor. Se compara por clase de
+        # altura: comparar nombres fallaba porque SHARP escribe "D#", nunca "Eb".
+        rel = self.tonic if self.mode == "major" else (self.tonic + 3) % 12
+        return rel in {5, 10, 3, 8, 1, 6}          # F Bb Eb Ab Db Gb
 
     def name(self) -> str:
         names = FLAT if self.flats else SHARP
@@ -320,10 +324,22 @@ def roman_numeral(chord: Chord, key: Key) -> str:
             return f"V{suffix or '7'}/{diatonic[tdeg][0]}"
 
     if degree in borrowed:
-        return borrowed[degree] + suffix
+        num = borrowed[degree]
+        # El prestamo fija el grado; la calidad la dice el acorde que suena.
+        if chord.quality != "aug":
+            num = num.rstrip("+")
+        if chord.quality.startswith("min") or chord.quality in ("dim", "dim7"):
+            num = num[:-len(num.lstrip("b#"))] + num.lstrip("b#").lower() if num else num
+        elif chord.quality in ("maj", "maj7", "7", "6", "9", "aug"):
+            num = num[:-len(num.lstrip("b#"))] + num.lstrip("b#").upper() if num else num
+        return num + suffix
 
-    names = FLAT if key.flats else SHARP
-    return f"({names[chord.root]})"
+    # Cromatico sin funcion reconocida: grado alterado respecto de la tonica
+    # (bII, bIII, #IV...), en mayuscula si es mayor y minuscula si es menor.
+    num = CROMATICOS[degree]
+    if chord.quality.startswith("min") or chord.quality in ("dim", "dim7"):
+        num = num.lower()
+    return num + suffix
 
 
 def simplify_chord(chord: Chord, key: Key) -> Chord:
@@ -358,6 +374,10 @@ def suggest_capo(key: Key) -> dict | None:
 
     Toca lo mismo que suena, pero con formas abiertas en vez de cejillas.
     """
+    # Si la tonalidad ya se toca con formas abiertas, no hace falta cejilla.
+    if (key.mode == "major" and key.tonic in EASY_KEYS) or \
+       (key.mode == "minor" and key.tonic in (9, 4, 2)):
+        return None
     best = None
     for capo in range(1, 8):
         shown = (key.tonic - capo) % 12
