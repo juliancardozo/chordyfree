@@ -1,0 +1,16 @@
+# Entorno
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Audio descargado y analisis generados.
+# No se publican: son obras con derechos de terceros, y el analisis se
+# reconstruye corriendo la herramienta sobre tu propio audio.
+cache/
+out/
+
+# macOS
+.DS_Store
